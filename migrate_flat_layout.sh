@@ -1,174 +1,158 @@
 #!/bin/bash
 
 # =============================================================================
-# ARCH LINUX MIGRATION SCRIPT - STRICT GUIDELINE ADHERENCE (Limine Version)
+# ARCH LINUX MIGRATION SUITE v3.0 (FINAL LIMINE EDITION)
 # =============================================================================
-# Reference: Guida Operativa 1.2, 1.3, 1.4
-# Description: Migrazione "a caldo" a layout Flat con ottimizzazioni SSD specifiche.
-# Bootloader: Limine (sostituisce GRUB/Systemd-boot della guida)
+# Description: Migrazione Layout Flat + Fix Fstab + Preparazione Snapper
+# Bootloader: Limine
 # =============================================================================
 
-# --- Configurazioni Estetiche ---
+# --- Colori e Stile ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# --- 1.4 Ottimizzazione Definitiva (Opzioni da Guida) ---
-# compress=zstd:1 : Basso impatto CPU
-# discard=async   : TRIM in background
-# ssd             : Ottimizzazioni allocazione SSD
-# noatime         : Evita scritture inutili
-# space_cache=v2  : Cache spazio libero performante
+# --- Opzioni Btrfs Ottimizzate (Guida 1.4) ---
 BTRFS_OPTS="defaults,noatime,compress=zstd:1,discard=async,ssd,space_cache=v2"
 
-log_info() { echo -e "${BOLD}${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_err() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+log_info() { echo -e "${BOLD}${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${BOLD}${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${BOLD}${YELLOW}[WARN]${NC} $1"; }
+log_err() { echo -e "${BOLD}${RED}[ERROR]${NC} $1"; exit 1; }
 
 banner() {
     clear
     echo -e "${BOLD}${GREEN}"
-    echo "   MIGRATOR TO FLAT LAYOUT (STRICT MODE)"
-    echo "   Bootloader: LIMINE"
-    echo -e "${NC}"
-    echo "Questo script applica le modifiche secondo la Guida Operativa 1.2-1.4"
+    echo "   ___  ___  ___  ______  ___  _____  _____  _____ "
+    echo "   |  \/  | / _ \ | ___ \ |  \/  ||  _  ||  _  | "
+    echo "   | .  . |/ /_\ \| |_/ / | .  . || | | || | | | "
+    echo "   | |\/| ||  _  ||    /  | |\/| || | | || | | | "
+    echo "   | |  | || | | || |\ \  | |  | |\ \_/ /\ \_/ / "
+    echo "   \_|  |_/\_| |_/\_| \_| \_|  |_/ \___/  \___/  "
+    echo -e "            LIMINE & SNAPPER FIX EDITION${NC}"
+    echo ""
+    echo "Questo script migra il sistema e pre-configura tutto per evitare"
+    echo "errori di mount al riavvio."
+    echo ""
 }
 
-# --- Main Logic ---
+# --- Check Root ---
+if [ "$EUID" -ne 0 ]; then log_err "Serve root."; fi
 
 banner
-
-if [ "$EUID" -ne 0 ]; then
-    log_err "Esegui come root."
-fi
-
-log_warn "Verranno creati snapshot e modificato fstab/limine.conf."
-echo -n "Procedere? [y/N]: "
+echo -n "Sei pronto per la migrazione? [y/N]: "
 read confirm
-if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-    log_err "Annullato."
-fi
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then log_err "Annullato."; fi
 
-# Rilevamento UUID Root
+# --- 1. Analisi Sistema ---
 ROOT_UUID=$(findmnt -n -o UUID /)
 log_info "UUID Root rilevato: $ROOT_UUID"
 
-# --- 1.2 Guida Operativa: Creazione Subvolumi ---
+# --- 2. Gestione Subvolumi ---
+log_info "Creazione struttura subvolumi..."
 
-# 1. Creare lo Snapshot Radice
-log_info "Creazione snapshot radice /@..."
+# Root @
 if [ ! -d "/@" ]; then
-    btrfs subvolume snapshot / /@ || log_err "Errore snapshot /@"
-    log_success "Snapshot /@ creato."
+    btrfs subvolume snapshot / /@ || log_err "Impossibile creare snapshot /@"
+    log_success "Snapshot root /@ creato."
 else
-    log_warn "/@ esiste già, proseguo."
+    log_warn "/@ esisteva già."
 fi
 
-# 2. Creare Subvolumi "Flat" Aggiuntivi
+# Subvolumi Flat
 SUBVOLS=("@home" "@snapshots" "@var_log")
 for sv in "${SUBVOLS[@]}"; do
     if [ ! -d "/$sv" ]; then
-        log_info "Creazione subvolume /$sv..."
-        btrfs subvolume create "/$sv" || log_err "Errore creazione $sv"
+        btrfs subvolume create "/$sv"
+        log_success "Creato subvolume /$sv"
     fi
 done
 
-# 3. Migrare i Dati
-# Nota: La guida raccomanda rsync -aAXv. 
-# Usiamo --info=progress2 per avere un output visivo migliore ma mantenendo -aAX
-log_info "Migrazione dati verso i nuovi subvolumi..."
+# --- 3. Migrazione Dati ---
+log_info "Sincronizzazione dati..."
 
-# Migrazione HOME
+# Home
 if [ -z "$(ls -A /@home)" ]; then
-    log_info "Eseguo rsync di /home (preserva ACL/XATTRS)..."
-    rsync -aAX --info=progress2 /home/ /@home/ || log_err "Rsync /home fallito"
-    log_success "/home migrata in /@home."
+    rsync -aAX --info=progress2 /home/ /@home/
+    log_success "/home migrata."
 fi
 
-# Migrazione VAR/LOG
+# Var Log
 if [ -z "$(ls -A /@var_log)" ]; then
-    log_info "Eseguo rsync di /var/log..."
-    rsync -aAX --info=progress2 /var/log/ /@var_log/ || log_err "Rsync /var/log fallito"
-    log_success "/var/log migrata in /@var_log."
+    rsync -aAX --info=progress2 /var/log/ /@var_log/
+    log_success "/var/log migrata."
 fi
 
-# 4. Svuotare i Vecchi Mountpoint (dentro lo snapshot @)
-# La guida dice: "la directory /home originale (che ora si trova dentro /@/home) deve essere svuotata"
-log_info "Pulizia dei mountpoint all'interno di /@..."
+# --- 4. Preparazione Mountpoint (IL FIX RICHIESTO) ---
+log_info "Preparazione mountpoint dentro la NUOVA root (@)..."
+
+# Puliamo i dati vecchi dentro lo snapshot @ per far posto ai mountpoint
 rm -rf /@/home/*
 rm -rf /@/var/log/*
-log_success "Mountpoint /@/home e /@/var/log svuotati."
 
-# --- 1.3 Riconfigurazione di /etc/fstab ---
+# --- FIX CRITICO SNAPPER ---
+# Creiamo la directory dentro @ che fungerà da mountpoint
+if [ ! -d "/@/.snapshots" ]; then
+    mkdir -p /@/.snapshots
+    log_success "Directory /@/.snapshots creata (Fix Fstab)."
+fi
+# Settiamo permessi sicuri preventivi
+chmod 750 /@/.snapshots
 
+# --- 5. Generazione Fstab Blindato ---
 log_info "Generazione nuovo /@/etc/fstab..."
-cp /etc/fstab /@/etc/fstab.bak # Backup
+cp /etc/fstab /@/etc/fstab.bak
 
 # Rilevamento Boot
 BOOT_UUID=$(findmnt -n -o UUID /boot)
 if [ -z "$BOOT_UUID" ] || [ "$BOOT_UUID" == "$ROOT_UUID" ]; then
-    # Boot folder dentro root
-    BOOT_ENTRY="# /boot è parte del filesystem root (cartella)"
     IS_BOOT_SEPARATE=false
+    BOOT_ENTRY="# /boot è una cartella nel subvolume root"
 else
-    # Partizione EFI separata
-    BOOT_ENTRY="UUID=$BOOT_UUID  /boot        vfat     rw,relatime,fmask=0022,dmask=0022,codepage=437,errors=remount-ro 0 2"
     IS_BOOT_SEPARATE=true
+    BOOT_ENTRY="UUID=$BOOT_UUID  /boot        vfat     rw,relatime,fmask=0022,dmask=0022,codepage=437,errors=remount-ro 0 2"
 fi
 
-# Scrittura Fstab con le opzioni del punto 1.4
 cat <<EOF > /@/etc/fstab
 # /etc/fstab: static file system information.
-# Generated by Migration Script following Guide 1.3/1.4
+# Generated by Marmoo Migration Script v3
 
-# Root Subvolume
+# Root
 UUID=$ROOT_UUID  /            btrfs    subvol=@,$BTRFS_OPTS 0 0
 
-# Subvolumi Aggiuntivi
+# Subvolumi Dati
 UUID=$ROOT_UUID  /home        btrfs    subvol=@home,$BTRFS_OPTS 0 0
-UUID=$ROOT_UUID  /.snapshots  btrfs    subvol=@snapshots,$BTRFS_OPTS 0 0
 UUID=$ROOT_UUID  /var/log     btrfs    subvol=@var_log,$BTRFS_OPTS 0 0
 
-# Partizione EFI / Boot
-$BOOT_ENTRY
+# Snapper (CRITICO: Questa riga mancava)
+UUID=$ROOT_UUID  /.snapshots  btrfs    subvol=@snapshots,$BTRFS_OPTS 0 0
 
-# Swap (se presente nel vecchio fstab, aggiungere manualmente qui sotto)
+# Bootloader
+$BOOT_ENTRY
 EOF
 
-# Recupero swap se esiste
+# Append Swap
 grep "swap" /etc/fstab >> /@/etc/fstab
-log_success "Nuovo fstab creato in /@/etc/fstab"
+log_success "Fstab creato correttamente con voce /.snapshots."
 
-# --- Aggiornamento Bootloader (Adattamento LIMINE) ---
-# La guida dice: "Il bootloader deve essere informato... rootflags=subvol=@"
-log_info "Aggiornamento configurazione Limine..."
-
+# --- 6. Aggiornamento Limine ---
+log_info "Configurazione Limine..."
 LIMINE_CONF="/boot/limine.conf"
-if [ ! -f "$LIMINE_CONF" ]; then
-    log_warn "File $LIMINE_CONF non trovato. Creazione di un config base."
-    touch "$LIMINE_CONF"
-else
-    cp "$LIMINE_CONF" "$LIMINE_CONF.bak-migrazione"
-fi
+[ -f "$LIMINE_CONF" ] && cp "$LIMINE_CONF" "$LIMINE_CONF.bak-migrazione"
 
-# Recupera cmdline attuale pulita
 CURRENT_CMDLINE=$(cat /proc/cmdline | sed -e 's/root=UUID=[^ ]*//g' -e 's/root=[^ ]*//g' -e 's/rootflags=[^ ]*//g' -e 's/rw//g')
 
-# Gestione path kernel per Limine
 if [ "$IS_BOOT_SEPARATE" = true ]; then
-    # Se /boot è partizione a parte, i file sono alla radice della partizione
     KERNEL_PATH="boot():/vmlinuz-linux"
     INITRD_PATH="boot():/initramfs-linux.img"
 else
-    # Se /boot è cartella, ora è dentro @/boot
     KERNEL_PATH="boot():/@/boot/vmlinuz-linux"
     INITRD_PATH="boot():/@/boot/initramfs-linux.img"
 fi
 
-# Scrittura Configurazione Limine
 cat <<EOF > "$LIMINE_CONF"
 timeout: 5
 
@@ -176,7 +160,6 @@ timeout: 5
     protocol: linux
     kernel_path: $KERNEL_PATH
     module_path: $INITRD_PATH
-    # Qui applichiamo la regola della guida: rootflags=subvol=@
     cmdline: root=UUID=$ROOT_UUID rw rootflags=subvol=@ $CURRENT_CMDLINE
 
 /Arch Linux (Fallback)
@@ -185,8 +168,55 @@ timeout: 5
     module_path: ${INITRD_PATH%.img}-fallback.img
     cmdline: root=UUID=$ROOT_UUID rw rootflags=subvol=@ $CURRENT_CMDLINE
 EOF
+log_success "Limine aggiornato."
 
-log_success "Limine aggiornato con rootflags=subvol=@."
+# --- 7. Generazione Script "Danza Snapper" per dopo il riavvio ---
+# Questo script viene salvato nella home di root del NUOVO sistema
+log_info "Creazione script di finalizzazione per il prossimo avvio..."
+
+cat <<EOF > /@/root/completa_snapper.sh
+#!/bin/bash
+# Script generato automaticamente per inizializzare Snapper sul layout Flat
+echo "Inizializzazione Snapper in corso..."
+
+# 1. Smonta il subvolume (che ora funziona grazie a fstab corretto)
+umount /.snapshots
+
+# 2. Rimuove la directory mountpoint
+rm -rf /.snapshots
+
+# 3. Crea la configurazione (che creerà un subvolume annidato)
+snapper -c root create-config /
+
+# 4. Elimina il subvolume annidato indesiderato
+btrfs subvolume delete /.snapshots
+
+# 5. Ripristina la directory mountpoint vuota
+mkdir /.snapshots
+
+# 6. Rimonta il subvolume corretto @snapshots
+mount -a
+
+# 7. Permessi
+chmod 750 /.snapshots
+chown :users /.snapshots
+
+echo "Snapper configurato con successo! Puoi cancellare questo script."
+snapper list
+EOF
+
+chmod +x /@/root/completa_snapper.sh
+
+# --- Fine ---
 echo ""
-echo -e "${BOLD}${GREEN}OPERAZIONE COMPLETATA.${NC}"
-echo "Riavvia il sistema e verifica con 'findmnt /' che subvol=/@ sia attivo."
+echo -e "${BOLD}${GREEN}MIGRAZIONE COMPLETATA.${NC}"
+echo "-----------------------------------------------------"
+echo "1. Il file /etc/fstab ora include correttamente /.snapshots."
+echo "2. La directory /.snapshots è stata creata."
+echo "3. È stato creato un file '/root/completa_snapper.sh' nel nuovo sistema."
+echo ""
+echo -e "${YELLOW}ISTRUZIONI PER IL RIAVVIO:${NC}"
+echo "1. Digita 'reboot'."
+echo "2. Al login, loggati come root."
+echo "3. Esegui: ${BOLD}./completa_snapper.sh${NC}"
+echo "-----------------------------------------------------"
