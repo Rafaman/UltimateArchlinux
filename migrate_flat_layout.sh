@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # ==============================================================================
-#  BTRFS FLAT LAYOUT MIGRATION TOOL
+#  BTRFS FLAT LAYOUT MIGRATION TOOL (SSD OPTIMIZED)
 # ==============================================================================
 #  Automatizza la conversione da layout Btrfs Nested a Flat.
 #  Include snapshot di sicurezza, migrazione dati e gestione subvolumi.
+#  INTEGRAZIONE 2.3: Ottimizzazione parametri Mount per NVMe/SSD.
 # ==============================================================================
 
 # --- CONFIGURAZIONE VISIVA ---
@@ -23,6 +24,7 @@ ICON_INFO="[i]"
 ICON_WARN="[!]"
 ICON_GEAR="[⚙]"
 ICON_DISK="[💾]"
+ICON_SPEED="[🚀]"
 
 # Variabili Globali
 MOUNT_POINT="/mnt"
@@ -38,7 +40,7 @@ print_banner() {
     echo "  | _ \  | |  |   /| _| \__ \| (__ |   / |  _/ "
     echo "  |___/  |_|  |_|_\|_|  |___/ \___||_|_\ |_|   "
     echo "                                               "
-    echo "      FLAT LAYOUT MIGRATOR | LIMINE READY      "
+    echo "      FLAT LAYOUT MIGRATOR | SSD OPTIMIZED     "
     echo -e "${NC}"
     echo -e "${BLUE}====================================================${NC}"
 }
@@ -67,26 +69,6 @@ check_root() {
     fi
 }
 
-check_dependency() {
-    local cmd=$1
-    echo -ne "   ${ICON_GEAR} Verifica ${cmd}...\r"
-    if ! command -v $cmd &> /dev/null; then
-        echo -e "${RED}${ICON_KO} Comando mancante: ${cmd}${NC}"
-        log_error "Installa ${cmd} prima di procedere."
-    else
-        echo -e "${GREEN}${ICON_OK} Dipendenza soddisfatta: ${cmd}   ${NC}"
-    fi
-}
-
-confirm_action() {
-    echo -e -n "${YELLOW}   Sei sicuro di voler procedere? (s/N): ${NC}"
-    read -r response
-    if [[ ! "$response" =~ ^([sS][iI]|[sS])$ ]]; then
-        echo -e "${RED}   Operazione annullata dall'utente.${NC}"
-        exit 0
-    fi
-}
-
 # --- LOGICA PRINCIPALE ---
 
 main() {
@@ -103,103 +85,99 @@ main() {
         fi
         
         # 2. Montaggio della nuova gerarchia
-        log_header "Montaggio struttura subvolumi in $MOUNT_POINT"
+        log_step "Montaggio struttura subvolumi in $MOUNT_POINT"
         
         # Smonta tutto per pulizia
         umount -R "$MOUNT_POINT" 2>/dev/null
         
+        # Opzioni di mount temporanee per la sessione live (prestazioni massime)
+        TEMP_OPTS="compress=zstd:1,noatime,space_cache=v2"
+
         # Mount Root (@)
         echo -e "   ${ICON_DISK} Montaggio @ su /"
-        mount -t btrfs -o subvol=@,compress=zstd,noatime "$TARGET_DEV" "$MOUNT_POINT"
+        mount -t btrfs -o subvol=@,$TEMP_OPTS "$TARGET_DEV" "$MOUNT_POINT"
         
-        # Creazione directory mountpoint se mancanti (dovrebbero esserci dalla fase 1)
+        # Creazione directory mountpoint se mancanti
         mkdir -p "$MOUNT_POINT/home"
         mkdir -p "$MOUNT_POINT/.snapshots"
         mkdir -p "$MOUNT_POINT/var/log"
-        mkdir -p "$MOUNT_POINT/boot/efi" # Assumendo EFI, crea se manca
+        mkdir -p "$MOUNT_POINT/boot/efi" 
         
         # Mount Subvolumi "Figli"
         echo -e "   ${ICON_DISK} Montaggio @home su /home"
-        mount -t btrfs -o subvol=@home,compress=zstd,noatime "$TARGET_DEV" "$MOUNT_POINT/home"
+        mount -t btrfs -o subvol=@home,$TEMP_OPTS "$TARGET_DEV" "$MOUNT_POINT/home"
         
         echo -e "   ${ICON_DISK} Montaggio @snapshots su /.snapshots"
-        mount -t btrfs -o subvol=@snapshots,compress=zstd,noatime "$TARGET_DEV" "$MOUNT_POINT/.snapshots"
+        mount -t btrfs -o subvol=@snapshots,$TEMP_OPTS "$TARGET_DEV" "$MOUNT_POINT/.snapshots"
         
         echo -e "   ${ICON_DISK} Montaggio @var_log su /var/log"
-        mount -t btrfs -o subvol=@var_log,compress=zstd,noatime "$TARGET_DEV" "$MOUNT_POINT/var/log"
+        mount -t btrfs -o subvol=@var_log,$TEMP_OPTS "$TARGET_DEV" "$MOUNT_POINT/var/log"
         
-        # 3. Generazione Fstab
-        log_header "Generazione automatica /etc/fstab"
+        # 3. Generazione Fstab Ottimizzato
+        log_step "Generazione automatica /etc/fstab (SSD Optimized)"
         
         FSTAB_FILE="$MOUNT_POINT/etc/fstab"
         # Backup del vecchio fstab
         cp "$FSTAB_FILE" "$FSTAB_FILE.bak.$(date +%s)"
         
-        echo -e "   ${ICON_GEAR} Scrittura nuovo fstab..."
+        echo -e "   ${ICON_SPEED} Applicazione parametri: zstd:1, noatime, discard=async, space_cache=v2"
         
         # Ottieni UUID
         UUID=$(blkid -s UUID -o value "$TARGET_DEV")
         
-        # Scrittura Fstab (Sovrascrittura controllata delle righe Btrfs)
-        # Mantiene le altre entry (come swap o partizione EFI) se presenti nel backup? 
-        # Per sicurezza, qui rigeneriamo le entry BTRFS essenziali.
-        # NOTA: Se hai una partizione EFI separata (/boot/efi), dovrai assicurarti che sia nell'fstab.
+        # Definizione opzioni ottimizzate in una variabile per pulizia
+        # NOTA: discard=async elimina i micro-lag del TRIM sincrono
+        # NOTA: zstd:1 riduce la Write Amplification aumentando la vita dell'SSD
+        OPT_FLAGS="defaults,noatime,compress=zstd:1,discard=async,space_cache=v2"
         
         cat <<EOF > "$FSTAB_FILE"
-        # /etc/fstab: static file system information.
-        # Generated by Automated Script
+# /etc/fstab: static file system information.
+# Generated by Automated Script (SSD Optimized Profile)
+
+# <file system>   <mount point>  <type>  <options>                                      <dump>  <pass>
+UUID=$UUID        /              btrfs   subvol=@,${OPT_FLAGS}           0       0
+UUID=$UUID        /home          btrfs   subvol=@home,${OPT_FLAGS}       0       0
+UUID=$UUID        /.snapshots    btrfs   subvol=@snapshots,${OPT_FLAGS}  0       0
+UUID=$UUID        /var/log       btrfs   subvol=@var_log,${OPT_FLAGS}    0       0
+
+# Recupera eventuali partizioni NON-btrfs dal vecchio fstab (es. /boot/efi o swap)
+EOF
         
-        # <file system>                           <mount point>  <type>  <options>                                 <dump>  <pass>
-        UUID=$UUID                                /              btrfs   subvol=@,defaults,noatime,compress=zstd   0       0
-        UUID=$UUID                                /home          btrfs   subvol=@home,defaults,noatime,compress=zstd 0     0
-        UUID=$UUID                                /.snapshots    btrfs   subvol=@snapshots,defaults,noatime,compress=zstd 0 0
-        UUID=$UUID                                /var/log       btrfs   subvol=@var_log,defaults,noatime,compress=zstd 0  0
-        
-        # Recupera eventuali partizioni NON-btrfs dal vecchio fstab (es. /boot/efi o swap)
-        EOF
-        
-        # Tentativo semplice di recuperare la partizione EFI dal vecchio fstab
+        # Recupero partizioni EFI/Swap
         grep -v "btrfs" "$FSTAB_FILE.bak"* | grep -E "vfat|swap" | cut -d: -f2- >> "$FSTAB_FILE"
         
-        echo -e "${GREEN}${ICON_OK} Fstab aggiornato.${NC}"
+        echo -e "${GREEN}${ICON_OK} Fstab aggiornato con successo.${NC}"
         
         # 4. Preparazione Chroot (Bind Mounts)
-        log_header "Preparazione Ambiente Chroot (Bind API FS)"
+        log_step "Preparazione Ambiente Chroot"
         
         for dir in dev proc sys run; do
             mount --bind /$dir "$MOUNT_POINT/$dir"
             mount --make-rslave "$MOUNT_POINT/$dir" 
         done
         
-        # Se c'è una partizione EFI, prova a montarla
-        # Cerca nel nuovo fstab dove è montata /boot o /boot/efi
-        EFI_PART=$(grep "/boot" "$FSTAB_FILE" | awk '{print $1}' | head -n 1)
+        # Mount EFI se rilevato
         EFI_MOUNT=$(grep "/boot" "$FSTAB_FILE" | awk '{print $2}' | head -n 1)
-        
-        if [[ -n "$EFI_PART" && -n "$EFI_MOUNT" ]]; then
-            # Risolvi UUID=... se necessario, ma mount di solito è intelligente
-            echo -e "   ${ICON_DISK} Rilevata partizione boot/efi in fstab, tentativo mount..."
-            mount "$MOUNT_POINT/$EFI_MOUNT"
+        if [[ -n "$EFI_MOUNT" ]]; then
+            echo -e "   ${ICON_DISK} Rilevato mountpoint EFI: $EFI_MOUNT"
+            mount "$MOUNT_POINT/$EFI_MOUNT" 2>/dev/null
         fi
         
-        
         # 5. Istruzioni Finali
-        log_header "Pronto per l'aggiornamento di GRUB"
-        echo -e "Il sistema è montato e pronto in ${BOLD}$MOUNT_POINT${NC}"
-        echo -e "Ora entrerai automaticamente in chroot."
-        echo -e "Esegui questo comando una volta dentro:"
+        log_step "Pronto per l'aggiornamento di GRUB"
+        echo -e "Il sistema è montato in ${BOLD}$MOUNT_POINT${NC}"
+        echo -e "Stai per entrare in chroot. Esegui:"
         echo -e "   ${GREEN}grub-mkconfig -o /boot/grub/grub.cfg${NC}"
-        echo -e "(Su Ubuntu/Debian puoi usare semplicemente: ${GREEN}update-grub${NC})"
         echo ""
-        echo -e "${YELLOW}Premi INVIO per entrare in Chroot (scrivi 'exit' per uscire)...${NC}"
+        echo -e "${YELLOW}Premi INVIO per entrare in Chroot...${NC}"
         read
         
         chroot "$MOUNT_POINT" /bin/bash
         
-        # Cleanup all'uscita
-        echo -e "\n${BLUE}Uscita dal Chroot. Smontaggio volumi...${NC}"
+        # Cleanup
+        echo -e "\n${BLUE}Uscita. Smontaggio volumi...${NC}"
         umount -R "$MOUNT_POINT"
-        echo -e "${GREEN}${ICON_OK} Procedura terminata. Puoi riavviare.${NC}"
+        echo -e "${GREEN}${ICON_OK} Procedura completata.${NC}"
 }
 
 # Avvio
