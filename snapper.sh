@@ -1,158 +1,176 @@
 #!/bin/bash
 
-# =============================================================================
-# ARCH LINUX SNAPPER & SNAP-PAC SETUP (LIMINE EDITION)
-# =============================================================================
-# Reference: Guida Operativa 2.3, 2.4 (Adattata per Limine)
-# Description: Configura snapshot automatici su layout Btrfs Flat.
-# =============================================================================
+# ==============================================================================
+#  ARCH RESILIENCE SYSTEM: SNAPPER & GRUB-BTRFS
+# ==============================================================================
+#  1. Configurazione Snapper per layout Btrfs Flat (@snapshots)
+#  2. Integrazione Hooks Pacman (snap-pac)
+#  3. Abilitazione Boot da Snapshot (grub-btrfs)
+#  4. Configurazione Retention Policy (Evita disco pieno)
+# ==============================================================================
 
-# --- Configurazioni Estetiche ---
+# --- STILE ---
+BOLD='\033[1m'
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
+YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-log_info() { echo -e "${BOLD}${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${BOLD}${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${BOLD}${YELLOW}[WARN]${NC} $1"; }
-log_err() { echo -e "${BOLD}${RED}[ERROR]${NC} $1"; exit 1; }
+ICON_CAM="[📷]"
+ICON_BOOT="[👢]"
+ICON_GEAR="[⚙]"
+ICON_CLEAN="[🧹]"
+ICON_OK="[✔]"
+ICON_WARN="[!]"
 
-banner() {
-    clear
-    echo -e "${BOLD}${GREEN}"
-    echo "   _____  _   _  ___  ______ ______  ___________ "
-    echo "  /  ___|| \ | |/ _ \ | ___ \| ___ \|  ___| ___ \\"
-    echo "  \ \`--. |  \| / /_\ \| |_/ /| |_/ /| |__ | |_/ /"
-    echo "   \`--. \| . \` |  _  ||  __/ |  __/ |  __||    / "
-    echo "  /\__/ /| |\  | | | || |    | |    | |___| |\ \ "
-    echo "  \____/ \_| \_/\_| |_/\_|    \_|    \____/\_| \_| "
-    echo -e "         SETUP FOR LIMINE & FLAT LAYOUT${NC}"
-    echo ""
-    echo "Questo script configurerà Snapper e Snap-pac."
-    echo "Poiché usi Limine, 'grub-btrfs' verrà ESCLUSO."
-    echo ""
-}
+# File di configurazione Snapper
+SNAP_CONF="/etc/snapper/configs/root"
+
+# --- FUNZIONI ---
+
+log_header() { echo -e "\n${BLUE}${BOLD}:: $1${NC}"; }
+log_success() { echo -e "${GREEN}${ICON_OK} $1${NC}"; }
+log_info() { echo -e "${CYAN}${ICON_GEAR} $1${NC}"; }
 
 check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        log_err "Devi eseguire lo script come root."
+    if [[ $EUID -ne 0 ]]; then
+       echo -e "${RED}Esegui come root (sudo).${NC}"
+       exit 1
     fi
 }
 
-# --- Main Logic ---
+install_pkg() {
+    if ! pacman -Qi $1 &> /dev/null; then
+        echo -e "${YELLOW}   Installazione mancante: $1...${NC}"
+        pacman -S --noconfirm $1
+    else
+        echo -e "${GREEN}${ICON_OK} Presente: $1${NC}"
+    fi
+}
 
-banner
+# --- MAIN ---
+
+clear
+echo -e "${CYAN}${BOLD}"
+echo "   ___  _  _   _   ___  ___  ___  ___ "
+echo "  / __|| \| | /_\ | _ \| _ \| __|| _ \\"
+echo "  \__ \| .\` |/ _ \|  _/|  _/| _| |   /"
+echo "  |___/|_|\_/_/ \_\_|  |_|  |___||_|_\ "
+echo "       RESILIENCE AUTOMATION           "
+echo -e "${NC}"
+echo -e "${BLUE}======================================${NC}"
+
 check_root
 
-echo -n "Vuoi procedere con la configurazione di Snapper? [y/N]: "
-read confirm
-if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-    log_err "Annullato."
-fi
+# 1. INSTALLAZIONE SOFTWARE
+log_header "1. Verifica Componenti Software"
+install_pkg "snapper"
+install_pkg "snap-pac"
+install_pkg "grub-btrfs"
+# inotify-tools serve al demone grub-btrfsd per guardare le cartelle
+install_pkg "inotify-tools" 
 
-# 1. Installazione Pacchetti (Senza grub-btrfs)
-log_info "Installazione pacchetti necessari..."
-# Installiamo solo snapper e snap-pac.
-# grub-btrfs è inutile per Limine e causerebbe errori se non trova grub.cfg
-pacman -S --noconfirm --needed snapper snap-pac || log_err "Installazione fallita."
-log_success "Pacchetti installati (Snapper, Snap-pac)."
+# 2. CONFIGURAZIONE SNAPPER (LA "DANZA" DEI SUBVOLUMI)
+log_header "2. Inizializzazione Snapper (Flat Layout Fix)"
 
-# 2. Configurazione Snapper per la ROOT
-log_info "Configurazione Snapper per la Root (/)..."
-
-# --- FIX CRITICO PER LAYOUT FLAT ---
-# Snapper create-config prova a creare un subvolume .snapshots dentro /.
-# Ma noi abbiamo già montato @snapshots in /.snapshots tramite fstab.
-# Dobbiamo smontarlo temporaneamente per permettere a Snapper di configurarsi,
-# poi cancellare la cartella creata da Snapper e rimontare il nostro subvolume.
-
-if mountpoint -q /.snapshots; then
-    log_info "Smontaggio temporaneo di /.snapshots per configurazione..."
-    umount /.snapshots || log_err "Impossibile smontare /.snapshots"
-fi
-
-# Rimuoviamo la directory se esiste (deve essere vuota/inesistente per create-config)
-if [ -d "/.snapshots" ]; then
-    rm -rf /.snapshots
-fi
-
-# Creazione configurazione
-log_info "Esecuzione snapper create-config..."
-snapper -c root create-config / || log_err "Creazione config root fallita"
-
-# Ora Snapper ha creato un subvolume annidato in /.snapshots. Lo eliminiamo.
-log_info "Ripristino mountpoint @snapshots (Layout Flat)..."
-btrfs subvolume delete /.snapshots &>/dev/null || rm -rf /.snapshots
-mkdir /.snapshots
-
-# Rimontiamo tutto usando fstab (che contiene la riga corretta per @snapshots)
-mount -a || log_err "Errore nel rimontare i volumi (controlla fstab!)"
-
-# Verifica
-if mountpoint -q /.snapshots; then
-    log_success "Configurazione root completata e @snapshots rimontato correttamente."
+# Controlla se esiste già una config
+if snapper list-configs | grep -q "root"; then
+    echo -e "${GREEN}${ICON_OK} Configurazione 'root' già esistente.${NC}"
 else
-    log_err "/.snapshots non risulta montato correttamente dopo l'operazione."
-fi
-
-# 3. Regolazione Permessi (Sezione 2.3 Guida)
-log_info "Impostazione permessi per lettura snapshot utente..."
-chmod a+rx /.snapshots
-# Assegniamo al gruppo users (o wheel se preferisci)
-chown :users /.snapshots
-log_success "Permessi /.snapshots aggiornati."
-
-# 4. Configurazione Opzionale per /home
-echo ""
-echo -n "Vuoi configurare gli snapshot anche per /home? [y/N]: "
-read conf_home
-if [[ "$conf_home" =~ ^[Yy]$ ]]; then
-    log_info "Configurazione Snapper per /home..."
-    snapper -c home create-config /home || log_warn "Configurazione home fallita (forse già esistente?)"
+    log_info "Creazione configurazione root..."
     
-    # Ottimizzazione retention policy per home (meno snapshot per risparmiare spazio)
-    snapper -c home set-config TIMELINE_LIMIT_HOURLY="5"
-    snapper -c home set-config TIMELINE_LIMIT_DAILY="7"
-    snapper -c home set-config TIMELINE_LIMIT_WEEKLY="0"
-    snapper -c home set-config TIMELINE_LIMIT_MONTHLY="0"
-    snapper -c home set-config TIMELINE_LIMIT_YEARLY="0"
-    log_success "Configurazione /home completata."
+    # TRICK CRITICO PER FLAT LAYOUT:
+    # 1. Smontiamo il vero subvolume @snapshots
+    umount /.snapshots 2>/dev/null
+    
+    # 2. Rimuoviamo la directory vuota
+    rm -rf /.snapshots
+    
+    # 3. Creiamo la config (Snapper crea un subvolume .snapshots nested qui)
+    snapper -c root create-config /
+    
+    # 4. Cancelliamo il subvolume nested che Snapper ha appena creato
+    btrfs subvolume delete /.snapshots
+    
+    # 5. Ricreiamo la directory
+    mkdir /.snapshots
+    
+    # 6. Rimontiamo il vero @snapshots (leggendo da fstab)
+    mount -a
+    
+    # 7. Impostiamo permessi (Root only per sicurezza, o 750 per gruppo wheel)
+    chmod 750 /.snapshots
+    
+    log_success "Snapper inizializzato correttamente su @snapshots."
 fi
 
-# 5. Configurazione Retention Policy (Sistema)
-# Riduciamo i default per evitare di riempire il disco troppo in fretta
-log_info "Ottimizzazione policy di ritenzione snapshot (Root)..."
-snapper -c root set-config TIMELINE_LIMIT_HOURLY="5"
-snapper -c root set-config TIMELINE_LIMIT_DAILY="7"
-snapper -c root set-config TIMELINE_LIMIT_WEEKLY="2"
-snapper -c root set-config TIMELINE_LIMIT_MONTHLY="0"
-snapper -c root set-config TIMELINE_LIMIT_YEARLY="0"
-# Abilita cleanup background
-systemctl enable --now snapper-timeline.timer
-systemctl enable --now snapper-cleanup.timer
-log_success "Policy applicate e timer attivati."
+# 3. CONFIGURAZIONE RETENTION POLICY
+log_header "3. Ottimizzazione Policy di Ritenzione"
+# Modifichiamo /etc/snapper/configs/root per evitare di riempire il disco
+# Teniamo:
+# - TIMELINE: Disabilitato o ridotto (snapper standard usa cron, noi preferiamo eventi)
+# - NUMBER: Importante per snap-pac (installazioni)
 
-# 6. Integrazione Bootloader (LIMINE SPECIFIC)
+if [[ -f "$SNAP_CONF" ]]; then
+    log_info "Applicazione best practices a $SNAP_CONF..."
+    
+    # Disabilita snapshot orari (timeline) per evitare overhead, ci affidiamo agli update
+    # O li teniamo molto bassi
+    sed -i 's/^TIMELINE_CREATE="yes"/TIMELINE_CREATE="no"/' "$SNAP_CONF"
+    
+    # Limita snapshot numerici (quelli di pacman)
+    # Tieni gli ultimi 10 importanti, non 50
+    sed -i 's/^NUMBER_LIMIT="50"/NUMBER_LIMIT="10"/' "$SNAP_CONF"
+    sed -i 's/^NUMBER_LIMIT_IMPORTANT="50"/NUMBER_LIMIT_IMPORTANT="5"/' "$SNAP_CONF"
+    
+    # Permetti al gruppo wheel di gestire snapper (opzionale, qui teniamo root)
+    # sed -i 's/^ALLOW_GROUPS=""/ALLOW_GROUPS="wheel"/' "$SNAP_CONF"
+
+    log_success "Policy applicate: Timeline OFF, Limit=10."
+else
+    echo -e "${RED}${ICON_WARN} File configurazione non trovato!${NC}"
+fi
+
+# 4. INTEGRAZIONE GRUB-BTRFS
+log_header "4. Attivazione Bootloader Integration"
+
+# Abilita il path unit che monitora /.snapshots
+log_info "Abilitazione grub-btrfsd (monitoraggio realtime)..."
+systemctl enable --now grub-btrfsd.path
+
+# Forza una rigenerazione immediata per vedere se rileva lo snapshot 0/iniziale
+echo -e "   ${ICON_BOOT} Rigenerazione menu GRUB..."
+# grub-mkconfig rileverà gli snapshot se presenti
+grub-mkconfig -o /boot/grub/grub.cfg &> /dev/null
+
+if systemctl is-active --quiet grub-btrfsd.path; then
+    log_success "Demone grub-btrfs attivo."
+else
+    echo -e "${RED}${ICON_WARN} Il demone grub-btrfs non sembra attivo.${NC}"
+fi
+
+# 5. CREAZIONE PRIMO SNAPSHOT MANUALE
+log_header "5. Creazione 'Baseline' Snapshot"
+echo -e "${CYAN}Creazione snapshot iniziale 'System Ready'..."
+snapper -c root create --description "Post-Installation Baseline"
+
+# Aggiornamento grub manuale per includere questo snapshot
+/etc/grub.d/41_snapshots-btrfs &> /dev/null
+
+log_success "Snapshot base creato e indicizzato."
+
 echo ""
-echo -e "${BOLD}${YELLOW}--- ATTENZIONE: INTEGRAZIONE BOOTLOADER ---${NC}"
-echo "La guida originale prevede 'grub-btrfs', che non funziona con Limine."
-echo "Gli snapshot verranno creati automaticamente (grazie a snap-pac) prima/dopo"
-echo "ogni installazione con pacman, MA non appariranno automaticamente nel menu di boot."
-
-log_info "Verifica creazione snapshot iniziale..."
-snapper -c root create --description "Configurazione Iniziale Post-Script"
-snapper ls | grep "Configurazione Iniziale" && log_success "Snapshot di prova creato con successo!"
-
+echo -e "${BLUE}======================================${NC}"
+echo -e "${GREEN}${BOLD}   RESILIENZA ATTIVATA   ${NC}"
+echo -e "${BLUE}======================================${NC}"
+echo -e "1. ${BOLD}snap-pac${NC}: Ogni 'pacman' genererà snapshot PRE e POST."
+echo -e "2. ${BOLD}grub-btrfs${NC}: Troverai la voce 'Arch Linux Snapshots' al boot."
+echo -e "3. ${BOLD}Rollback${NC}:"
+echo -e "   Se il sistema si rompe:"
+echo -e "   a) Riavvia e seleziona uno snapshot dal menu GRUB."
+echo -e "   b) Verifica che tutto funzioni."
+echo -e "   c) Apri il terminale e digita: ${BOLD}snapper rollback${NC}"
+echo -e "   d) Riavvia per rendere la modifica permanente."
 echo ""
-echo -e "${BOLD}${GREEN}SETUP COMPLETATO!${NC}"
-echo "-----------------------------------------------------"
-echo "1. Gli snapshot automatici sono ATTIVI (snap-pac)."
-echo "2. Puoi gestire gli snapshot con: 'snapper list', 'snapper rollback'."
-echo "3. Per avviare dagli snapshot con Limine, hai due opzioni:"
-echo "   A) Installare 'limine-snapper-sync' (disponibile su AUR)."
-echo "      (Consigliato se vuoi un menu automatico simile a GRUB)."
-echo "   B) Usare Limine manualmente editando limine.conf in caso di emergenza."
-echo "-----------------------------------------------------"
