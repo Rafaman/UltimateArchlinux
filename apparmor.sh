@@ -62,9 +62,6 @@ check_root
 log_header "1. Installazione Componenti AppArmor"
 
 PACKAGES="apparmor audit python-psutil"
-# Aggiungiamo apparmor-profiles se vuoi i profili extra, ma la guida cita "confina app vulnerabili"
-# quindi è meglio averli come base.
-PACKAGES="$PACKAGES apparmor-profiles"
 
 log_info "Installazione: $PACKAGES..."
 if pacman -S --needed --noconfirm $PACKAGES > /dev/null 2>&1; then
