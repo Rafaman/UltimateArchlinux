@@ -1,184 +1,230 @@
 #!/bin/bash
 
-# ==============================================================================
-#  BTRFS FLAT LAYOUT MIGRATION TOOL (SSD OPTIMIZED)
-# ==============================================================================
-#  Automatizza la conversione da layout Btrfs Nested a Flat.
-#  Include snapshot di sicurezza, migrazione dati e gestione subvolumi.
-#  INTEGRAZIONE 2.3: Ottimizzazione parametri Mount per NVMe/SSD.
-# ==============================================================================
+# =============================================================================
+# ARCH LINUX MIGRATION SCRIPT - FLAT LAYOUT V2 (Expanded)
+# =============================================================================
+# Description: Migra il sistema corrente (Online) a Layout Flat Esteso.
+#              Gestisce: Root, Home, Log, Pkg Cache, Snapshots.
+#              Supporta installazioni esistenti (es. Archinstall).
+# =============================================================================
 
-# --- CONFIGURAZIONE VISIVA ---
-BOLD='\033[1m'
+# --- Configurazione ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
+YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+BOLD='\033[1m'
+NC='\033[0m'
 
-# Icone
-ICON_OK="[✔]"
-ICON_KO="[✘]"
-ICON_INFO="[i]"
-ICON_WARN="[!]"
-ICON_GEAR="[⚙]"
-ICON_DISK="[💾]"
-ICON_SPEED="[🚀]"
+# Opzioni Mount: zstd:1 (veloce/SSD), discard=async (SSD Trim), noatime
+BTRFS_OPTS="defaults,noatime,compress=zstd:1,discard=async,ssd,space_cache=v2"
+# Per la cache pacchetti non serve compressione (i pkg sono già compressi)
+PKG_OPTS="defaults,noatime,discard=async,ssd,space_cache=v2"
 
-# Variabili Globali
-MOUNT_POINT="/mnt"
-LOG_FILE="btrfs_migration.log"
-
-# --- FUNZIONI DI UTILITÀ ---
-
-print_banner() {
-    clear
-    echo -e "${CYAN}${BOLD}"
-    echo "   ___  _____  ___  ___  ___   ___  ___   ___  "
-    echo "  | _ )|_   _|| _ \| __|/ __| / __|| _ \ | _ \ "
-    echo "  | _ \  | |  |   /| _| \__ \| (__ |   / |  _/ "
-    echo "  |___/  |_|  |_|_\|_|  |___/ \___||_|_\ |_|   "
-    echo "                                               "
-    echo "      FLAT LAYOUT MIGRATOR | SSD OPTIMIZED     "
-    echo -e "${NC}"
-    echo -e "${BLUE}====================================================${NC}"
-}
-
-log_step() {
-    echo -e "\n${BLUE}${BOLD}:: $1${NC}"
-    echo "Step: $1" >> "$LOG_FILE"
-}
-
-log_success() {
-    echo -e "${GREEN}${ICON_OK} $1${NC}"
-}
-
-log_error() {
-    echo -e "${RED}${ICON_KO} ERRORE: $1${NC}"
-    exit 1
-}
-
-log_warn() {
-    echo -e "${YELLOW}${ICON_WARN} ATTENZIONE: $1${NC}"
-}
+# --- Funzioni ---
+log_info() { echo -e "${BLUE}[INFO]${NC} ${BOLD}$1${NC}"; }
+log_success() { echo -e "${GREEN}[OK]${NC} ${BOLD}$1${NC}"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} ${BOLD}$1${NC}"; }
+log_err() { echo -e "${RED}[ERR]${NC} ${BOLD}$1${NC}"; exit 1; }
 
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-       log_error "Questo script deve essere eseguito come root (sudo)."
+    if [ "$EUID" -ne 0 ]; then log_err "Serve root (sudo)."; fi
+}
+
+check_dependency() {
+    local cmd=$1
+    echo -ne "   Verifica ${cmd}...\r"
+    if ! command -v $cmd &> /dev/null; then
+        log_err "Comando mancante: ${cmd}. Installalo prima di procedere."
+    else
+        echo -e "${GREEN}${ICON_OK} Trovato: ${cmd}           ${NC}"
     fi
 }
 
-# --- LOGICA PRINCIPALE ---
-
-main() {
-        print_banner
-        check_root
-        
-        # 1. Acquisizione Target
-        echo -e -n "${BOLD}Inserisci la partizione di ROOT (es. /dev/sda2): ${NC}"
-        read -r TARGET_DEV
-        
-        if [[ ! -b "$TARGET_DEV" ]]; then
-            echo -e "${RED}Device non valido.${NC}"
-            exit 1
-        fi
-        
-        # 2. Montaggio della nuova gerarchia
-        log_step "Montaggio struttura subvolumi in $MOUNT_POINT"
-        
-        # Smonta tutto per pulizia
-        umount -R "$MOUNT_POINT" 2>/dev/null
-        
-        # Opzioni di mount temporanee per la sessione live (prestazioni massime)
-        TEMP_OPTS="compress=zstd:1,noatime,space_cache=v2"
-
-        # Mount Root (@)
-        echo -e "   ${ICON_DISK} Montaggio @ su /"
-        mount -t btrfs -o subvol=@,$TEMP_OPTS "$TARGET_DEV" "$MOUNT_POINT"
-        
-        # Creazione directory mountpoint se mancanti
-        mkdir -p "$MOUNT_POINT/home"
-        mkdir -p "$MOUNT_POINT/.snapshots"
-        mkdir -p "$MOUNT_POINT/var/log"
-        mkdir -p "$MOUNT_POINT/boot/efi" 
-        
-        # Mount Subvolumi "Figli"
-        echo -e "   ${ICON_DISK} Montaggio @home su /home"
-        mount -t btrfs -o subvol=@home,$TEMP_OPTS "$TARGET_DEV" "$MOUNT_POINT/home"
-        
-        echo -e "   ${ICON_DISK} Montaggio @snapshots su /.snapshots"
-        mount -t btrfs -o subvol=@snapshots,$TEMP_OPTS "$TARGET_DEV" "$MOUNT_POINT/.snapshots"
-        
-        echo -e "   ${ICON_DISK} Montaggio @var_log su /var/log"
-        mount -t btrfs -o subvol=@var_log,$TEMP_OPTS "$TARGET_DEV" "$MOUNT_POINT/var/log"
-        
-        # 3. Generazione Fstab Ottimizzato
-        log_step "Generazione automatica /etc/fstab (SSD Optimized)"
-        
-        FSTAB_FILE="$MOUNT_POINT/etc/fstab"
-        # Backup del vecchio fstab
-        cp "$FSTAB_FILE" "$FSTAB_FILE.bak.$(date +%s)"
-        
-        echo -e "   ${ICON_SPEED} Applicazione parametri: zstd:1, noatime, discard=async, space_cache=v2"
-        
-        # Ottieni UUID
-        UUID=$(blkid -s UUID -o value "$TARGET_DEV")
-        
-        # Definizione opzioni ottimizzate in una variabile per pulizia
-        # NOTA: discard=async elimina i micro-lag del TRIM sincrono
-        # NOTA: zstd:1 riduce la Write Amplification aumentando la vita dell'SSD
-        OPT_FLAGS="defaults,noatime,compress=zstd:1,discard=async,space_cache=v2"
-        
-        cat <<EOF > "$FSTAB_FILE"
-# /etc/fstab: static file system information.
-# Generated by Automated Script (SSD Optimized Profile)
-
-# <file system>   <mount point>  <type>  <options>                                      <dump>  <pass>
-UUID=$UUID        /              btrfs   subvol=@,${OPT_FLAGS}           0       0
-UUID=$UUID        /home          btrfs   subvol=@home,${OPT_FLAGS}       0       0
-UUID=$UUID        /.snapshots    btrfs   subvol=@snapshots,${OPT_FLAGS}  0       0
-UUID=$UUID        /var/log       btrfs   subvol=@var_log,${OPT_FLAGS}    0       0
-
-# Recupera eventuali partizioni NON-btrfs dal vecchio fstab (es. /boot/efi o swap)
-EOF
-        
-        # Recupero partizioni EFI/Swap
-        grep -v "btrfs" "$FSTAB_FILE.bak"* | grep -E "vfat|swap" | cut -d: -f2- >> "$FSTAB_FILE"
-        
-        echo -e "${GREEN}${ICON_OK} Fstab aggiornato con successo.${NC}"
-        
-        # 4. Preparazione Chroot (Bind Mounts)
-        log_step "Preparazione Ambiente Chroot"
-        
-        for dir in dev proc sys run; do
-            mount --bind /$dir "$MOUNT_POINT/$dir"
-            mount --make-rslave "$MOUNT_POINT/$dir" 
-        done
-        
-        # Mount EFI se rilevato
-        EFI_MOUNT=$(grep "/boot" "$FSTAB_FILE" | awk '{print $2}' | head -n 1)
-        if [[ -n "$EFI_MOUNT" ]]; then
-            echo -e "   ${ICON_DISK} Rilevato mountpoint EFI: $EFI_MOUNT"
-            mount "$MOUNT_POINT/$EFI_MOUNT" 2>/dev/null
-        fi
-        
-        # 5. Istruzioni Finali
-        log_step "Pronto per l'aggiornamento di GRUB"
-        echo -e "Il sistema è montato in ${BOLD}$MOUNT_POINT${NC}"
-        echo -e "Stai per entrare in chroot. Esegui:"
-        echo -e "   ${GREEN}grub-mkconfig -o /boot/grub/grub.cfg${NC}"
-        echo ""
-        echo -e "${YELLOW}Premi INVIO per entrare in Chroot...${NC}"
-        read
-        
-        chroot "$MOUNT_POINT" /bin/bash
-        
-        # Cleanup
-        echo -e "\n${BLUE}Uscita. Smontaggio volumi...${NC}"
-        umount -R "$MOUNT_POINT"
-        echo -e "${GREEN}${ICON_OK} Procedura completata.${NC}"
+banner() {
+    clear
+    echo -e "${BOLD}${BLUE}"
+    echo "   ___  ___  ___  ______  ___  _____  _____  _____ "
+    echo "   |  \/  | / _ \ | ___ \ |  \/  ||  _  ||  _  | "
+    echo "   | .  . |/ /_\ \| |_/ / | .  . || | | || | | | "
+    echo "   | |\/| ||  _  ||     / | |\/| || | | || | | | "
+    echo "   | |  | || | | || |\ \  | |  | |\ \_/ /\ \_/ / "
+    echo "   \_|  |_/\_| |_/\_| \_| \_|  |_/ \___/  \___/  "
+    echo -e "            ${YELLOW}GRUB ONLINE MIGRATOR${BLUE}${NC}"
+    echo "   Migrazione a Flat Layout (@, @home...) "
+    echo "   Eseguibile direttamente dal sistema attivo."
+    echo -e "${NC}"
 }
 
-# Avvio
-main
+# --- MAIN ---
+
+check_root
+log_info "Verifica prerequisiti..."
+check_dependency "btrfs"
+check_dependency "rsync"
+check_dependency "grub-mkconfig"
+check_dependency "findmnt"
+echo ""
+banner
+
+echo -n "Sei pronto a migrare il sistema 'Online'? [y/N]: "
+read confirm
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then log_err "Annullato."; fi
+
+# 1. Analisi
+log_info "Analisi filesystem..."
+ROOT_UUID=$(findmnt -n -o UUID /)
+BOOT_UUID=$(findmnt -n -o UUID /boot 2>/dev/null)
+log_success "Root UUID: $ROOT_UUID"
+
+# 2. Root Snapshot (@)
+# Creiamo la nuova root base partendo dal sistema attuale
+if [ ! -d "/@" ]; then
+    log_info "Creazione snapshot di sistema in /@..."
+    btrfs subvolume snapshot / /@ || log_err "Snapshot root fallito."
+    log_success "Snapshot /@ creato."
+else
+    log_warn "Snapshot /@ già esistente. Procedo."
+fi
+
+# 3. Gestione Subvolumi Extra
+# Definiamo mappa: NomeSubvol -> PercorsoDatiAttuale
+declare -A SUBVOLS
+SUBVOLS=( 
+    ["@home"]="/home" 
+    ["@log"]="/var/log" 
+    ["@pkg"]="/var/cache/pacman/pkg" 
+    ["@snapshots"]="/.snapshots" 
+)
+
+log_info "Verifica e creazione subvolumi mancanti..."
+
+for sv in "${!SUBVOLS[@]}"; do
+    path="${SUBVOLS[$sv]}"
+    
+    # Creazione Subvolume se manca
+    if [ ! -d "/$sv" ]; then
+        btrfs subvolume create "/$sv"
+        log_success "Creato /$sv"
+    else
+        log_info "/$sv esistente, salto creazione."
+    fi
+    
+    # Migrazione Dati (Rsync)
+    # Copiamo i dati dal sistema live dentro il subvolume
+    # Nota: Escludiamo .snapshots dalla copia rsync per evitare loop
+    if [ "$sv" != "@snapshots" ]; then
+        if [ -d "$path" ] && [ -n "$(ls -A $path 2>/dev/null)" ]; then
+            # Se il subvolume di destinazione è vuoto, sincronizza
+            if [ -z "$(ls -A /$sv)" ]; then
+                echo -e "   Sync dati: $path -> /$sv ..."
+                rsync -aAX "$path/" "/$sv/"
+                log_success "Dati migrati in $sv"
+            fi
+        fi
+    fi
+done
+
+# 4. Pulizia dentro la NUOVA Root (@)
+log_info "Preparazione mountpoint vuoti in /@..."
+# I dati ora sono nei subvolumi (@home, @log, etc).
+# Dobbiamo svuotare le cartelle corrispondenti DENTRO LO SNAPSHOT @
+# affinché funzionino da punti di montaggio puliti.
+
+clean_dir() {
+    dir=$1
+    if [ -d "/@$dir" ]; then
+        # rm -rf su /@/percorso/* cancella il contenuto SOLO nello snapshot
+        rm -rf "/@$dir"/*
+        log_success "Svuotato /@$dir (Ready for mount)"
+    else
+        mkdir -p "/@$dir"
+    fi
+}
+
+clean_dir "/home"
+clean_dir "/var/log"
+clean_dir "/var/cache/pacman/pkg"
+clean_dir "/.snapshots"
+
+# Assicuriamo permessi corretti per cartella snapshots
+chmod 750 /@/.snapshots
+
+# 5. Generazione Fstab
+log_info "Aggiornamento /@/etc/fstab..."
+cp /etc/fstab /@/etc/fstab.bak
+
+# Preservazione entry di boot se separata
+BOOT_ENTRY=""
+if [ -n "$BOOT_UUID" ] && [ "$BOOT_UUID" != "$ROOT_UUID" ]; then
+    BOOT_ENTRY=$(grep "/boot " /etc/fstab)
+fi
+
+cat <<EOF > /@/etc/fstab
+# /etc/fstab: Generated by Migrator V2
+
+# Root
+UUID=$ROOT_UUID  /                      btrfs  subvol=@,$BTRFS_OPTS  0 0
+
+# Dati Utente e Log
+UUID=$ROOT_UUID  /home                  btrfs  subvol=@home,$BTRFS_OPTS  0 0
+UUID=$ROOT_UUID  /var/log               btrfs  subvol=@log,$BTRFS_OPTS   0 0
+
+# Cache Pacchetti (Escluso da Snapshots)
+UUID=$ROOT_UUID  /var/cache/pacman/pkg  btrfs  subvol=@pkg,$PKG_OPTS     0 0
+
+# Snapper
+UUID=$ROOT_UUID  /.snapshots            btrfs  subvol=@snapshots,$BTRFS_OPTS 0 0
+
+# Partizioni Extra (Boot/EFI/Swap)
+$BOOT_ENTRY
+EOF
+
+grep "swap" /etc/fstab >> /@/etc/fstab
+log_success "Fstab scritto (include @log e @pkg)."
+
+# 6. Aggiornamento GRUB (Metodo Chroot)
+log_info "Configurazione GRUB..."
+
+GRUB_FILE="/@/etc/default/grub"
+if [ -f "$GRUB_FILE" ]; then
+    if ! grep -q "rootflags=subvol=@" "$GRUB_FILE"; then
+        sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/&rootflags=subvol=@ /' "$GRUB_FILE"
+        log_success "Iniettato rootflags=subvol=@"
+    fi
+fi
+
+log_info "Rigenerazione grub.cfg in chroot..."
+
+# Mount API filesystems
+mount --bind /dev /@/dev
+mount --bind /proc /@/proc
+mount --bind /sys /@/sys
+mount --bind /run /@/run
+if [ -d "/sys/firmware/efi/efivars" ]; then
+    mount --bind /sys/firmware/efi/efivars /@/sys/firmware/efi/efivars
+fi
+
+# Mount /boot se necessario
+if [ -n "$BOOT_ENTRY" ]; then
+    mount --bind /boot /@/boot
+fi
+
+# Esecuzione
+chroot /@ grub-mkconfig -o /boot/grub/grub.cfg
+
+# Cleanup
+umount /@/boot 2>/dev/null
+umount /@/sys/firmware/efi/efivars 2>/dev/null
+umount /@/run /@/sys /@/proc /@/dev
+
+echo ""
+echo -e "${BOLD}${GREEN}MIGRAZIONE COMPLETATA.${NC}"
+echo "Subvolumi creati e popolati:"
+echo " - @ (Root)"
+echo " - @home"
+echo " - @log (/var/log)"
+echo " - @pkg (/var/cache/pacman/pkg)"
+echo " - @snapshots"
+echo ""
+echo "Puoi riavviare: reboot"
